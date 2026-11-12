@@ -12,23 +12,16 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, openOverlay, closeOverlay, appHome, hc, shared, setShared, nextCommand, theme, exec } from "herdr";
 import { t as translate, language, initLanguage } from "./i18n.js";
+import { windowSize, doesFit, nextFitSize, canOpenVideo, bestFitSize, SIZES, SIZE_ORDER, CHAR_W, LINE_H, PAD, CONTROLS_H, AUDIO_ONLY_H } from "./layout.js";
 import { fps_monitor } from "gpui-fps";
 import net from "net";
 import { readFile, writeFile } from "fs/promises";
 
 const MOD = "tunr";
 const ENGINE_NAME = "tunr-engine";
-const SIZES = { S: { cols: 48, rows: 16 }, M: { cols: 64, rows: 22 }, L: { cols: 80, rows: 27 } };
-const SIZE_ORDER = ["S", "M", "L"];
-// 字：JetBrains Mono 10px（寬約 6px），行高 12px
-const CHAR_W = 6;
-const LINE_H = 12;
-const PAD = 8;
-const CONTROLS_H = 50;
 // 低彩度的 8 個顏色：0 中性、1 紅、2 黃、3 綠、4 青、5 藍、6 洋紅、7 亮中性（飽和度都壓在 0.2–0.3）
 const PALETTE = ["#b4b4b4", "#c49a9a", "#c4b896", "#9ec4a0", "#96bcc4", "#9aa4c8", "#c49ac0", "#e2e2e2"];
 const MONO_COLOR = "#c8c8c8";
-const AUDIO_ONLY_H = 24;
 const tr = (key, vars = {}) => translate(key, vars, language(shared));
 
 const dir = () => `${appHome()}/mods/${MOD}`;
@@ -52,12 +45,15 @@ async function readConfig() {
   }
 }
 
-// 視窗大小：畫面開著就是字格加控制列；關畫面只剩控制列
-function windowSize(sizeKey, video) {
-  const { cols, rows } = SIZES[sizeKey] ?? SIZES.S;
-  const width = cols * CHAR_W + PAD * 2;
-  const height = video ? rows * LINE_H + PAD * 2 + CONTROLS_H : AUDIO_ONLY_H + CONTROLS_H;
-  return { width, height };
+async function readWindowPlace(key) {
+  try {
+    const raw = JSON.parse(await readFile(`${appHome()}/windows.json`, "utf8"));
+    const pl = raw.places?.[key];
+    if (Array.isArray(pl) && pl.length >= 2 && Number.isFinite(pl[0]) && Number.isFinite(pl[1])) {
+      return { x: pl[0], y: pl[1] };
+    }
+  } catch {}
+  return null;
 }
 
 export default class Tunr extends View {
@@ -73,10 +69,21 @@ export default class Tunr extends View {
     this.cfg = p.cfg ?? {};
     this.source = p.source ?? null;
     this.sizeKey = p.size ?? "S";
+    this.prevSizeKey = this.sizeKey;
     this.mode = p.mode ?? "mono";
     this.video = p.video !== false;
+    this.prevVideo = this.video;
     this.volume = p.volume ?? 80;
     this.debug = Boolean(p.debug);
+    this.notice = null;
+    this.noticeToken = 0;
+    this.pos = p.at ? { x: p.at.x, y: p.at.y } : null;
+    this.bounds = p.bounds ? { ...p.bounds } : null;
+    if (!this.pos) {
+      readWindowPlace(MOD).then((pl) => {
+        if (pl && !this.pos) this.pos = pl;
+      }).catch(() => {});
+    }
     this.showFps = false;
     this.frame = "";
     this.status = { pos: 0, dur: 0, playing: false };
@@ -104,13 +111,17 @@ export default class Tunr extends View {
     this.win = { received: 0, shown: 0, dropped: 0, renders: 0, jsMs: 0, segs: 0, since: now() };
     if (this.source) cx.spawn(async (cx) => this.connectEngine(cx, p.resume ?? null));
     cx.spawn(async (cx) => {
+      await cx.sleep(50);
+      await this.ensureFit(cx);
+    });
+    cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
         if (this.closed) return;
         if (c === "toggle") this.send({ cmd: "toggle" });
-        if (c === "video") this.setVideo(cx, !this.video);
+        if (c === "video") await this.setVideo(cx, !this.video);
         if (c === "mode") this.setMode(!this.mode || this.mode === "mono" ? "low" : "mono");
-        if (c === "size") this.cycleSize(cx);
+        if (c === "size") await this.cycleSize(cx);
         if (c === "system") this.loadSource(cx, "system");
         if (c === "close") closeOverlay(props().overlay);
         if (c === "language-auto") setShared("ui.language", "auto");
@@ -137,13 +148,25 @@ export default class Tunr extends View {
         setShared("tunr.window", null);
       }
     }
-    const sizeKey = SIZES[cfg.size] ? cfg.size : "S";
+    let sizeKey = SIZES[cfg.size] ? cfg.size : "S";
     const video = cfg.video !== false;
+    const place = await readWindowPlace(MOD);
+    const vp = typeof window !== "undefined" && window?.viewport_size ? window.viewport_size() : null;
+
+    if (place && vp && !doesFit(place, windowSize(sizeKey, video), vp)) {
+      const best = bestFitSize(place, video, vp);
+      if (best) sizeKey = best;
+    }
+
     const { width, height } = windowSize(sizeKey, video);
-    const id = openOverlay({
+    const spec = {
       mod: MOD, kind: "window", key: "tunr", keep: true, width, height,
-      props: { window: true, source: cfg.source ?? null, size: sizeKey, mode: cfg.mode === "low" ? "low" : "mono", video, volume: cfg.volume ?? 80, debug: Boolean(cfg.debug), cfg },
-    });
+      props: {
+        window: true, source: cfg.source ?? null, size: sizeKey, mode: cfg.mode === "low" ? "low" : "mono",
+        video, volume: cfg.volume ?? 80, debug: Boolean(cfg.debug), cfg,
+      },
+    };
+    const id = openOverlay(spec);
     setShared("tunr.window", id);
     closeOverlay(p.overlay);
   }
@@ -263,31 +286,99 @@ export default class Tunr extends View {
     }
   }
 
+  getViewport() {
+    return typeof window !== "undefined" && window?.viewport_size ? window.viewport_size() : null;
+  }
+
+  async getCurrentPos() {
+    if (this.bounds && Number.isFinite(this.bounds.x) && Number.isFinite(this.bounds.y)) {
+      return { x: this.bounds.x, y: this.bounds.y };
+    }
+    if (this.pos && Number.isFinite(this.pos.x) && Number.isFinite(this.pos.y)) {
+      return { x: this.pos.x, y: this.pos.y };
+    }
+    const place = await readWindowPlace(MOD);
+    if (place) return place;
+    return null;
+  }
+
+  showNotice(cx, text) {
+    this.notice = text;
+    const token = ++this.noticeToken;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      await cx.sleep(3000);
+      if (this.noticeToken === token && !this.closed) {
+        this.notice = null;
+        cx.notify();
+      }
+    });
+  }
+
+  async ensureFit(cx) {
+    if (this.closed || !this.isWindow) return;
+    const curPos = await this.getCurrentPos();
+    const vp = this.getViewport();
+    if (!curPos || !vp) return;
+    const currentSize = windowSize(this.sizeKey, this.video);
+    if (!doesFit(curPos, currentSize, vp)) {
+      const best = bestFitSize(curPos, this.video, vp);
+      if (best && best !== this.sizeKey) {
+        this.sizeKey = best;
+        const { cols, rows } = SIZES[this.sizeKey];
+        this.send({ cmd: "size", cols, rows });
+        await this.resize(cx);
+      }
+    }
+  }
+
   // ---- 控制 ----
-  setVideo(cx, on) {
+  async setVideo(cx, on) {
+    if (on && !this.video) {
+      const curPos = await this.getCurrentPos();
+      const vp = this.getViewport();
+      if (!canOpenVideo(this.sizeKey, curPos, vp)) {
+        this.showNotice(cx, tr("noRoom", { size: this.sizeKey }));
+        return;
+      }
+    }
     this.video = on;
     this.send({ cmd: "video", on });
     if (!on) { this.frame = ""; this.pendingFrame = false; }
-    this.resize(cx);
+    await this.resize(cx);
   }
   setMode(m) {
     this.mode = m;
     this.send({ cmd: "mode", mode: m });
   }
-  cycleSize(cx) {
-    this.sizeKey = SIZE_ORDER[(SIZE_ORDER.indexOf(this.sizeKey) + 1) % SIZE_ORDER.length];
-    const { cols, rows } = SIZES[this.sizeKey];
-    this.send({ cmd: "size", cols, rows });
-    this.resize(cx);
+  async cycleSize(cx) {
+    const curPos = await this.getCurrentPos();
+    const vp = this.getViewport();
+    const fit = nextFitSize(this.sizeKey, curPos, this.video, vp);
+    if (fit.skipped) {
+      this.showNotice(cx, tr("noRoom", { size: fit.skipped }));
+    }
+    if (fit.changed) {
+      this.sizeKey = fit.sizeKey;
+      const { cols, rows } = SIZES[this.sizeKey];
+      this.send({ cmd: "size", cols, rows });
+      await this.resize(cx);
+    }
   }
-  // 同一個 key 再開一次 = 原地換成新大小（位置不動）；引擎留著，新視窗接回同一個埠
-  resize(cx) {
+  // 同一個 key 再開一次 = 原地換成新大小；引擎留著，新視窗接回同一個埠
+  async resize(cx) {
     const { width, height } = windowSize(this.sizeKey, this.video);
     this.handoff = true;
-    const id = openOverlay({
+    const spec = {
       mod: MOD, kind: "window", key: "tunr", keep: true, width, height,
-      props: { window: true, source: this.source, size: this.sizeKey, mode: this.mode, video: this.video, volume: this.volume, debug: this.debug, cfg: this.cfg, resume: this.source ? { port: this.port } : null },
-    });
+      props: {
+        window: true, source: this.source, size: this.sizeKey, mode: this.mode, video: this.video,
+        volume: this.volume, debug: this.debug, cfg: this.cfg,
+        resume: this.source ? { port: this.port } : null,
+        bounds: this.bounds,
+      },
+    };
+    const id = openOverlay(spec);
     setShared("tunr.window", id);
   }
   setVolume(v) {
@@ -405,7 +496,8 @@ export default class Tunr extends View {
               .child(div().flex_none().child(`${mmss(s.pos)}/${mmss(s.dur)}`))
           )
           .when(isSystem, (el) =>
-            el.child(div().flex_1().text_color(t.dim).child(tr("systemAudio")))
+            // 關畫面時上方那行已經寫著「電腦的聲音」，這裡留空當間隔
+            el.child(div().flex_1().text_color(t.dim).child(this.video ? tr("systemAudio") : ""))
           ),
       )
       .child(
@@ -440,15 +532,35 @@ export default class Tunr extends View {
           .child(this.btn("tunr-close", "✕", () => closeOverlay(props().overlay), { tip: tr("close") })),
       );
 
+    const updateBounds = (e) => {
+      const b = e?.bounds;
+      if (b && Number.isFinite(b.x) && Number.isFinite(b.y)) {
+        this.bounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+        this.pos = { x: b.x, y: b.y };
+      }
+    };
+
     const root = v_flex().id("tunr-root").relative().size_full().bg("#0b0b0b").overflow_hidden()
+      .on_mouse_move((e) => updateBounds(e))
+      .on_mouse_down("left", (e) => updateBounds(e))
+      .on_mouse_up("left", (e) => updateBounds(e))
       .on_drop((e, cx) => { const f = e.paths?.[0]; if (f) this.loadSource(cx, f); })
       .child(
         this.video
           ? v_flex().flex_1().items_center().justify_center().p(PAD).child(screen)
           : v_flex().h(AUDIO_ONLY_H).px(PAD).justify_center().text_size(10).text_color(t.dim)
-              .child(this.message ? tr(this.message, { command: this.installCommand }) : (isSystem ? tr("systemAudio") : (this.source ? this.source.split(/[\\/]/).pop() : tr("drop")))),
+              .child(this.notice ? div().text_color(t.accent ?? "#e3814f").child(this.notice) : (this.message ? tr(this.message, { command: this.installCommand }) : (isSystem ? tr("systemAudio") : (this.source ? this.source.split(/[\\/]/).pop() : tr("drop"))))),
       )
       .child(controls)
+      .when(Boolean(this.video && this.notice), (el) =>
+        el.child(
+          div()
+            .absolute().top(PAD + 4).left(PAD + 4).right(PAD + 4).px(8).py(3).rounded(4)
+            .bg(t.chrome ?? "#1f1f1f").border(1, t.accent ?? "#e3814f")
+            .text_size(10).text_color(t.foreground).text_center().whitespace_nowrap().overflow_hidden()
+            .child(this.notice)
+        )
+      )
       .when(this.message === "missingYtDlp", (el) => el.child(div().absolute().bottom(52).left(8).bg(t.chrome).child(this.btn("tunr-copy", tr("copyCommand"), (cx) => { cx.write_to_clipboard(this.installCommand); this.copied = true; }, { tip: tr(this.copied ? "copied" : "copyCommand") }))))
       .when(this.showUrl, (el) => el.child(div().absolute().top(4).left(4).right(4).p(6).bg(t.chrome).child(Input.new(this.urlInput).w_full().text_size(12).text_color(t.foreground))))
       .when(this.debug && this.showFps, (el) => el.child(div().absolute().top(4).right(4).w(150).h(110).child(div().relative().size_full().child(fps_monitor()))));
