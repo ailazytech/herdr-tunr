@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "install-mod": "node install.mjs"
+    "install-mod": "node install.mjs",
+    "test": "node --test test/i18n.test.mjs test/install.test.mjs test/source.test.mjs"
   }
 }

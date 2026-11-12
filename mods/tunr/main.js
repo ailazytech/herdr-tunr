@@ -9,8 +9,9 @@
 //
 // 指令：herdr-app do tunr.toggle（播放／暫停）、tunr.video、tunr.mode、tunr.size、tunr.close（只到視窗那份）
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { props, openOverlay, closeOverlay, appHome, hc, shared, setShared, nextCommand, theme } from "herdr";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { props, openOverlay, closeOverlay, appHome, hc, shared, setShared, nextCommand, theme, exec } from "herdr";
+import { t as translate, language, initLanguage } from "./i18n.js";
 import { fps_monitor } from "gpui-fps";
 import net from "net";
 import { readFile, writeFile } from "fs/promises";
@@ -28,6 +29,7 @@ const CONTROLS_H = 50;
 const PALETTE = ["#b4b4b4", "#c49a9a", "#c4b896", "#9ec4a0", "#96bcc4", "#9aa4c8", "#c49ac0", "#e2e2e2"];
 const MONO_COLOR = "#c8c8c8";
 const AUDIO_ONLY_H = 24;
+const tr = (key, vars = {}) => translate(key, vars, language(shared));
 
 const dir = () => `${appHome()}/mods/${MOD}`;
 const now = () => (globalThis.performance?.now ? globalThis.performance.now() : Date.now());
@@ -79,7 +81,15 @@ export default class Tunr extends View {
     this.frame = "";
     this.status = { pos: 0, dur: 0, playing: false };
     this.shownSecond = -1;
-    this.message = this.source ? "連線中…" : "把影音檔拖進來";
+    this.message = this.source ? "connecting" : "drop";
+    this.installCommand = "winget install yt-dlp.yt-dlp";
+    this.showUrl = false;
+    this.urlInput = null;
+    cx.spawn(async () => {
+      await initLanguage(shared, setShared, exec);
+      try { const r = await exec("node", ["-p", "process.platform"]); if (r.stdout.trim() === "darwin") this.installCommand = "brew install yt-dlp"; else if (r.stdout.trim() === "linux") this.installCommand = "pipx install yt-dlp"; } catch {}
+      cx.notify();
+    });
     this.sock = null;
     this.handoff = false;
     this.closed = false;
@@ -96,6 +106,9 @@ export default class Tunr extends View {
         if (c === "mode") this.setMode(!this.mode || this.mode === "mono" ? "low" : "mono");
         if (c === "size") this.cycleSize(cx);
         if (c === "close") closeOverlay(props().overlay);
+        if (c === "language-auto") setShared("ui.language", "auto");
+        if (c === "language-zh") setShared("ui.language", "zh-TW");
+        if (c === "language-en") setShared("ui.language", "en");
         cx.notify();
       }
     });
@@ -154,7 +167,7 @@ export default class Tunr extends View {
       if (resume?.port) this.port = resume.port;
       else await this.startEngine(this.source);
       let sock = null;
-      for (let i = 0; i < 60 && !this.closed; i++) {
+      for (let i = 0; i < 650 && !this.closed; i++) {
         try {
           sock = await net.connect("127.0.0.1", this.port);
           break;
@@ -162,7 +175,7 @@ export default class Tunr extends View {
           await cx.sleep(150);
         }
       }
-      if (!sock) throw new Error("連不上引擎");
+      if (!sock) throw new Error("connectFailed");
       if (this.closed) { sock.close(); return; }
       this.sock = sock;
       this.message = null;
@@ -170,7 +183,7 @@ export default class Tunr extends View {
       if (!resume) this.send({ cmd: "play" });
       await this.readLoop(cx, sock);
     } catch (e) {
-      this.message = String(e?.message ?? e);
+      this.message = "connectFailed";
       cx.notify();
     }
   }
@@ -192,7 +205,7 @@ export default class Tunr extends View {
     }
     if (sock === this.sock && !this.closed && !this.handoff) {
       this.sock = null;
-      this.message = "引擎已結束";
+      this.message = "engineEnded";
       cx.notify();
     }
   }
@@ -209,6 +222,7 @@ export default class Tunr extends View {
     if (s.stats) return;
     const before = this.status;
     this.status = s;
+    if (s.error) this.message = s.error;
     // 關畫面時只在畫面上看得到的東西變了才重畫：時間（每秒）、播放狀態等，不然每 250 毫秒一次沒有意義
     const sec = Math.floor(s.pos ?? 0);
     const changed = sec !== this.shownSecond || before.playing !== s.playing || before.video !== s.video || before.mode !== s.mode || before.volume !== s.volume || before.ended !== s.ended || s.hello;
@@ -265,7 +279,7 @@ export default class Tunr extends View {
   async loadSource(cx, path) {
     this.source = path;
     this.frame = "";
-    this.message = "連線中…";
+    this.message = "connecting";
     this.status = { pos: 0, dur: 0, playing: false };
     try { this.send({ cmd: "quit" }); this.sock?.close(); } catch {}
     this.sock = null;
@@ -310,6 +324,7 @@ export default class Tunr extends View {
       .text_color(opts.on ? t.foreground : t.muted)
       .when(opts.on, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .when(Boolean(opts.tip), (el) => el.tooltip(opts.tip))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => { onClick(cx); cx.notify(); })
       .child(label);
@@ -346,7 +361,7 @@ export default class Tunr extends View {
           .w(cols * CHAR_W).h(rows * LINE_H).items_center().justify_center().overflow_hidden()
           .font_family("JetBrains Mono").text_size(10).line_height(`${LINE_H}px`)
           .text_color(MONO_COLOR)
-          .when(Boolean(this.message), (el) => el.child(div().text_color(t.dim).child(this.message)))
+          .when(Boolean(this.message), (el) => el.child(div().text_color(t.dim).child(tr(this.message, { command: this.installCommand }))))
           .child(v_flex().children(this.frameRows()))
       : null;
     this.win.segs += this.lastSegs ?? 0;
@@ -358,21 +373,34 @@ export default class Tunr extends View {
     const controls = v_flex().gap(4).px(PAD).py(4).text_size(11).text_color(t.muted).bg(t.chrome)
       .child(
         h_flex().gap(6).items_center()
-          .child(this.btn("tunr-play", s.playing ? "⏸" : "▶", () => this.send({ cmd: "toggle" })))
+          .child(this.btn("tunr-play", s.playing ? "⏸" : "▶", () => this.send({ cmd: "toggle" }), { tip: tr(s.playing ? "pause" : "play") }))
           .child(seekBar)
           .child(div().flex_none().child(`${mmss(s.pos)}/${mmss(s.dur)}`)),
       )
       .child(
         h_flex().gap(3).items_center().whitespace_nowrap()
-          .child(this.btn("tunr-vol-", "−", () => this.setVolume(this.volume - 10)))
+          .child(this.btn("tunr-vol-", "−", () => this.setVolume(this.volume - 10), { tip: tr("volumeDown") }))
           .child(div().w(20).flex_none().text_color(t.foreground).child(`${this.volume}`))
-          .child(this.btn("tunr-vol+", "+", () => this.setVolume(this.volume + 10)))
+          .child(this.btn("tunr-vol+", "+", () => this.setVolume(this.volume + 10), { tip: tr("volumeUp") }))
           .child(div().flex_1())
-          .child(this.btn("tunr-video", "畫面", (cx) => this.setVideo(cx, !this.video), { on: this.video }))
-          .child(this.btn("tunr-mode", this.mode === "low" ? "低彩" : "黑白", () => this.setMode(this.mode === "low" ? "mono" : "low")))
-          .child(this.btn("tunr-size", this.sizeKey, (cx) => this.cycleSize(cx)))
-          .when(this.debug, (el) => el.child(this.btn("tunr-fps", "FPS", () => { this.showFps = !this.showFps; }, { on: this.showFps })))
-          .child(this.btn("tunr-close", "✕", () => closeOverlay(props().overlay))),
+          .child(this.btn("tunr-url", "🔗", (cx) => {
+            this.showUrl = !this.showUrl;
+            if (this.showUrl) {
+              let text = "";
+              try { text = (cx.read_from_clipboard() ?? "").trim(); } catch {}
+              const value = /^https?:\/\/[^\s/]+(?:[/?#][^\s]*)?$/i.test(text) ? text : "";
+              this.urlInput?.release();
+              this.urlInput = InputState.new({ value, placeholder: tr("urlPlaceholder") });
+              this.urlInput.on("submit", (_e, inputCx) => { const url = this.urlInput.value().trim(); if (url) { this.showUrl = false; this.loadSource(inputCx, url); inputCx.notify(); } });
+              this.urlInput.set_selected_range({ start: 0, end: value.length });
+              this.urlInput.focus();
+            }
+          }, { tip: tr("url") }))
+          .child(this.btn("tunr-video", tr("video"), (cx) => this.setVideo(cx, !this.video), { on: this.video, tip: tr("videoHelp") }))
+          .child(this.btn("tunr-mode", tr(this.mode === "low" ? "low" : "mono"), () => this.setMode(this.mode === "low" ? "mono" : "low"), { tip: tr("mode") }))
+          .child(this.btn("tunr-size", this.sizeKey, (cx) => this.cycleSize(cx), { tip: tr("size") }))
+          .when(this.debug, (el) => el.child(this.btn("tunr-fps", "FPS", () => { this.showFps = !this.showFps; }, { on: this.showFps, tip: tr("fps") })))
+          .child(this.btn("tunr-close", "✕", () => closeOverlay(props().overlay), { tip: tr("close") })),
       );
 
     const root = v_flex().id("tunr-root").relative().size_full().bg("#0b0b0b").overflow_hidden()
@@ -381,9 +409,11 @@ export default class Tunr extends View {
         this.video
           ? v_flex().flex_1().items_center().justify_center().p(PAD).child(screen)
           : v_flex().h(AUDIO_ONLY_H).px(PAD).justify_center().text_size(10).text_color(t.dim)
-              .child(this.message ?? (this.source ? this.source.split(/[\\/]/).pop() : "把影音檔拖進來")),
+              .child(this.message ? tr(this.message, { command: this.installCommand }) : (this.source ? this.source.split(/[\\/]/).pop() : tr("drop"))),
       )
       .child(controls)
+      .when(this.message === "missingYtDlp", (el) => el.child(div().absolute().bottom(52).left(8).bg(t.chrome).child(this.btn("tunr-copy", tr("copyCommand"), (cx) => { cx.write_to_clipboard(this.installCommand); this.copied = true; }, { tip: tr(this.copied ? "copied" : "copyCommand") }))))
+      .when(this.showUrl, (el) => el.child(div().absolute().top(4).left(4).right(4).p(6).bg(t.chrome).child(Input.new(this.urlInput).w_full().text_size(12).text_color(t.foreground))))
       .when(this.debug && this.showFps, (el) => el.child(div().absolute().top(4).right(4).w(150).h(110).child(div().relative().size_full().child(fps_monitor()))));
     this.st.jsMs += now() - t0;
     this.win.jsMs += now() - t0;

@@ -9,6 +9,7 @@
 import net from "node:net";
 import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+import { needsYtDlp } from "./source.mjs";
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback) => {
@@ -39,7 +40,25 @@ const S = {
 };
 
 // ---- 來源資訊 ----
+const extracted = needsYtDlp(SOURCE);
+let videoSource = SOURCE, audioSource = SOURCE, sourceError = null;
+function resolveSource() {
+  if (!extracted) return null;
+  const result = spawnSync("yt-dlp", ["--dump-single-json", "--no-playlist", "-f", "bv*[height<=360]+ba/b[height<=360]/b", "--", SOURCE], { encoding: "utf8", windowsHide: true, timeout: 90000, maxBuffer: 16 * 1024 * 1024 });
+  if (result.error?.code === "ENOENT") { sourceError = "missingYtDlp"; return null; }
+  if (result.status !== 0) { sourceError = "resolveFailed"; return null; }
+  try {
+    const info = JSON.parse(result.stdout);
+    const formats = info.requested_formats ?? [info];
+    const v = formats.find(f => f.vcodec && f.vcodec !== "none") ?? formats[0];
+    const a = formats.find(f => f.acodec && f.acodec !== "none") ?? v;
+    if (!v?.url || !a?.url) throw new Error("missing stream URL");
+    videoSource = v.url; audioSource = a.url; sourceError = null;
+    return { dur: Number(info.duration) || 0, hasAudio: Boolean(a.acodec && a.acodec !== "none"), hasVideo: Boolean(v.vcodec && v.vcodec !== "none"), w: v.width || info.width || 16, h: v.height || info.height || 9 };
+  } catch { sourceError = "resolveFailed"; return null; }
+}
 function probe() {
+  if (extracted) return resolveSource() ?? { dur: 0, hasAudio: false, hasVideo: false, w: 16, h: 9 };
   const r = spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height", "-of", "json", SOURCE], { encoding: "utf8", windowsHide: true });
   let info = {};
   try { info = JSON.parse(r.stdout || "{}"); } catch {}
@@ -55,7 +74,7 @@ function probe() {
 }
 const SRC = probe();
 S.dur = SRC.dur;
-if (!SRC.hasVideo) S.video = false;
+if (!SRC.hasVideo && !sourceError) S.video = false;
 
 // 在 cols×rows 裡保持比例：回傳實際的字數
 function fit() {
@@ -95,7 +114,7 @@ function send(text) {
 }
 function sendStatus(extra = {}) {
   const pos = Math.min(clock(), S.dur || clock());
-  send("\x01" + JSON.stringify({ pos: +pos.toFixed(2), dur: +S.dur.toFixed(2), playing: S.playing, ended: S.ended, video: S.video, mode: S.mode, cols: S.cols, rows: S.rows, volume: S.volume, fps: FPS, ...extra }));
+  send("\x01" + JSON.stringify({ pos: +pos.toFixed(2), dur: +S.dur.toFixed(2), playing: S.playing, ended: S.ended, video: S.video, mode: S.mode, cols: S.cols, rows: S.rows, volume: S.volume, fps: FPS, error: sourceError, ...extra }));
 }
 
 // ---- 影像 ----
@@ -155,7 +174,7 @@ function startVideo(at) {
   const bpp = gray ? 1 : 3;
   const size = c * r * bpp;
   const proc = spawn("ffmpeg", [
-    "-v", "error", "-nostdin", "-ss", String(at), "-i", SOURCE,
+    "-v", "error", "-nostdin", "-ss", String(at), "-i", videoSource,
     "-an", "-vf", `scale=${c}:${r}:flags=area,format=${gray ? "gray" : "rgb24"}`, "-r", String(FPS),
     "-f", "rawvideo", "-",
   ], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
@@ -183,7 +202,8 @@ function startVideo(at) {
     stats.maxQueue = Math.max(stats.maxQueue, queue.length);
     if (queue.length > 48) proc.stdout.pause();
   });
-  proc.on("exit", () => { if (video === me) video = null; });
+  proc.on("error", () => {});
+  proc.on("exit", (code) => { if (video === me) { video = null; if (code && extracted && S.playing) retryStream(at); } });
 }
 
 // 每 8 毫秒看一次：該顯示的幀（pts ≤ 時鐘）只送最新的一張，其餘算丟幀
@@ -217,7 +237,7 @@ function stopAudio() {
 function startAudio(at) {
   stopAudio();
   if (!SRC.hasAudio) return;
-  const proc = spawn("ffplay", ["-nodisp", "-autoexit", "-hide_banner", "-ss", String(at), "-volume", String(Math.round(S.volume)), SOURCE], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  const proc = spawn("ffplay", ["-nodisp", "-autoexit", "-hide_banner", "-ss", String(at), "-volume", String(Math.round(S.volume)), audioSource], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   const me = { proc, dead: false };
   audio = me;
   audioStartedAt = now();
@@ -239,9 +259,11 @@ function startAudio(at) {
     }
     if (buf.length > 4096) buf = "";
   });
-  proc.on("exit", () => {
+  proc.on("error", () => {});
+  proc.on("exit", (code) => {
     if (me.dead) return;
     audio = null;
+    if (extracted && S.playing && (code || (!clk && (!S.dur || at < S.dur - 1)))) { retryStream(at); return; }
     // 自然播完
     S.playing = false;
     S.ended = true;
@@ -252,7 +274,18 @@ function startAudio(at) {
 }
 
 // ---- 指令 ----
-function play(at = S.pos) {
+let retried = false;
+function retryStream(at) {
+  if (retried) { S.playing = false; sourceError = "playFailed"; stopAudio(); stopVideo(); sendStatus(); return; }
+  retried = true;
+  at = Math.max(at, clock());
+  stopAudio(); stopVideo();
+  if (!resolveSource()) { S.playing = false; sendStatus(); return; }
+  play(at, true);
+}
+function play(at = S.pos, retry = false) {
+  if (sourceError) { sendStatus(); return; }
+  if (!retry) retried = false;
   if (S.ended || (S.dur && at >= S.dur - 0.2)) { at = 0; }
   S.ended = false;
   S.pos = at;

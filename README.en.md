@@ -9,12 +9,12 @@ herdr is the herder, [tendr](https://github.com/ailazytech/tendr) tends the fire
 - **Small:** 48×16 characters by default, or medium (64×22) and large (80×27); drag it anywhere, and it comes back where you left it after a restart
 - **Black and white, or low color:** low color uses only 8 muted colors, so it doesn't pull your eye from your work
 - **Screen off:** keep just the sound and a control bar; nothing is redrawn
-- **Sources:** local files or direct links (mp4, mp3…); drop a file on the window to switch
+- **Sources:** local files, direct links (mp4, mp3…) or YouTube and other sites supported by yt-dlp; drop a file or press 🔗 to enter a URL
 
 ## You need
 
 - The herdr app (installed and opened once), Node.js 18 or later
-- `ffmpeg`, `ffplay` and `ffprobe` on the PATH (Windows: `winget install Gyan.FFmpeg`)
+- `ffmpeg`, `ffplay` and `ffprobe` on the PATH; YouTube and similar sites also need `yt-dlp`
 
 ## Install
 
@@ -24,6 +24,7 @@ node herdr-tunr/install.mjs
 ```
 
 Installs only `~/.config/herdr-app/mods/tunr/` and changes no layout; your `config.json` is never overwritten. To update, `git pull` and run it again.
+The installer checks the tools and offers installation commands. In an interactive terminal it can run them; `--yes` runs eligible commands without asking. Linux sudo commands must be run manually. A new terminal picks up PATH changes; herdr refreshes its new terminals automatically, so the app need not be restarted.
 
 ## Open it
 
@@ -34,6 +35,7 @@ Installs only `~/.config/herdr-app/mods/tunr/` and changes no layout; your `conf
 ## Controls
 
 The bar at the bottom of the window: play / pause, the progress bar (click to jump), volume − / +, screen on / off, black and white / low color, S / M / L, ✕ to close.
+Press 🔗 to open the URL field. An HTTP(S) URL on the clipboard is filled in and selected automatically; press Enter to play, or edit or clear it. The language setting is shared with ranchr and herdr-quota; use `tunr.language-auto`, `tunr.language-zh` or `tunr.language-en` to change it.
 
 Commands (`herdr-app do tunr.<command>`, or `tunr.<command>` in `keys.json`): `toggle` (play / pause), `video` (screen on / off), `mode`, `size`, `close`.
 
@@ -59,8 +61,7 @@ Commands (`herdr-app do tunr.<command>`, or `tunr.<command>` in `keys.json`): `t
 ## Limits
 
 - Pausing, seeking, changing the volume or the mode restarts the background programs, with a 0.2–0.5 s gap
-- No YouTube yet (it needs `yt-dlp`), no Spotify, no podcast search
-- The window speaks Chinese only for now
+- No Spotify or podcast search; site playback depends on yt-dlp and the source's restrictions
 
 ## Remove
 
