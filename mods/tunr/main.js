@@ -4,10 +4,10 @@
 // 開法：herdr-app do mod.open --name tunr（或 herdr-quota 狀態列的 tunr 按鈕）。這個實例只是啟動器：它開出真正的懸浮視窗
 // （kind window、key tunr、keep：記住位置，App 重開後回來），然後把自己關掉。視窗開著時再 mod.open 一次會關掉視窗。
 // 設定放同一個資料夾的 config.json（沒有也行）：
-//   { "source": "C:/Videos/a.mp4", "size": "S|M|L", "mode": "mono|low", "video": true, "volume": 80, "debug": false }
+//   { "source": "C:/Videos/a.mp4" | "system", "size": "S|M|L", "mode": "mono|low", "video": true, "volume": 80, "debug": false }
 // 把影音檔拖進視窗也能換來源。debug: true 會多一顆 FPS 鈕，並每 2 秒把量到的數字寫到 ~/.config/herdr-app/data/tunr-stats.json。
 //
-// 指令：herdr-app do tunr.toggle（播放／暫停）、tunr.video、tunr.mode、tunr.size、tunr.close（只到視窗那份）
+// 指令：herdr-app do tunr.toggle（播放／暫停）、tunr.video、tunr.mode、tunr.size、tunr.system、tunr.close（只到視窗那份）
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, openOverlay, closeOverlay, appHome, hc, shared, setShared, nextCommand, theme, exec } from "herdr";
@@ -87,7 +87,13 @@ export default class Tunr extends View {
     this.urlInput = null;
     cx.spawn(async () => {
       await initLanguage(shared, setShared, exec);
-      try { const r = await exec("node", ["-p", "process.platform"]); if (r.stdout.trim() === "darwin") this.installCommand = "brew install yt-dlp"; else if (r.stdout.trim() === "linux") this.installCommand = "pipx install yt-dlp"; } catch {}
+      try {
+        const r = await exec("node", ["-p", "process.platform"]);
+        const plat = r.stdout.trim();
+        this.platform = plat;
+        if (plat === "darwin") this.installCommand = "brew install yt-dlp";
+        else if (plat === "linux") this.installCommand = "pipx install yt-dlp";
+      } catch {}
       cx.notify();
     });
     this.sock = null;
@@ -105,6 +111,7 @@ export default class Tunr extends View {
         if (c === "video") this.setVideo(cx, !this.video);
         if (c === "mode") this.setMode(!this.mode || this.mode === "mono" ? "low" : "mono");
         if (c === "size") this.cycleSize(cx);
+        if (c === "system") this.loadSource(cx, "system");
         if (c === "close") closeOverlay(props().overlay);
         if (c === "language-auto") setShared("ui.language", "auto");
         if (c === "language-zh") setShared("ui.language", "zh-TW");
@@ -164,6 +171,23 @@ export default class Tunr extends View {
 
   async connectEngine(cx, resume) {
     try {
+      if (this.source === "system") {
+        let plat = this.platform;
+        if (!plat) {
+          try {
+            const r = await exec("node", ["-p", "process.platform"]);
+            plat = r.stdout.trim();
+            this.platform = plat;
+          } catch {
+            plat = typeof process !== "undefined" ? process.platform : "win32";
+          }
+        }
+        if (plat && plat !== "win32") {
+          this.message = "windowsOnly";
+          cx.notify();
+          return;
+        }
+      }
       if (resume?.port) this.port = resume.port;
       else await this.startEngine(this.source);
       let sock = null;
@@ -354,6 +378,7 @@ export default class Tunr extends View {
     this.win.renders++;
     const { cols, rows } = SIZES[this.sizeKey];
     const s = this.status;
+    const isSystem = this.source === "system" || Boolean(s.isSystem);
     const frac = s.dur ? Math.max(0, Math.min(1, (s.pos ?? 0) / s.dur)) : 0;
 
     const screen = this.video
@@ -374,15 +399,27 @@ export default class Tunr extends View {
       .child(
         h_flex().gap(6).items_center()
           .child(this.btn("tunr-play", s.playing ? "⏸" : "▶", () => this.send({ cmd: "toggle" }), { tip: tr(s.playing ? "pause" : "play") }))
-          .child(seekBar)
-          .child(div().flex_none().child(`${mmss(s.pos)}/${mmss(s.dur)}`)),
+          .when(!isSystem, (el) =>
+            el
+              .child(seekBar)
+              .child(div().flex_none().child(`${mmss(s.pos)}/${mmss(s.dur)}`))
+          )
+          .when(isSystem, (el) =>
+            el.child(div().flex_1().text_color(t.dim).child(tr("systemAudio")))
+          ),
       )
       .child(
         h_flex().gap(3).items_center().whitespace_nowrap()
-          .child(this.btn("tunr-vol-", "−", () => this.setVolume(this.volume - 10), { tip: tr("volumeDown") }))
-          .child(div().w(20).flex_none().text_color(t.foreground).child(`${this.volume}`))
-          .child(this.btn("tunr-vol+", "+", () => this.setVolume(this.volume + 10), { tip: tr("volumeUp") }))
+          .when(!isSystem, (el) =>
+            el
+              .child(this.btn("tunr-vol-", "−", () => this.setVolume(this.volume - 10), { tip: tr("volumeDown") }))
+              .child(div().w(20).flex_none().text_color(t.foreground).child(`${this.volume}`))
+              .child(this.btn("tunr-vol+", "+", () => this.setVolume(this.volume + 10), { tip: tr("volumeUp") }))
+          )
           .child(div().flex_1())
+          .child(this.btn("tunr-system", "📻", (cx) => {
+            if (!isSystem) this.loadSource(cx, "system");
+          }, { on: isSystem, tip: tr("systemAudioTip") }))
           .child(this.btn("tunr-url", "🔗", (cx) => {
             this.showUrl = !this.showUrl;
             if (this.showUrl) {
@@ -409,7 +446,7 @@ export default class Tunr extends View {
         this.video
           ? v_flex().flex_1().items_center().justify_center().p(PAD).child(screen)
           : v_flex().h(AUDIO_ONLY_H).px(PAD).justify_center().text_size(10).text_color(t.dim)
-              .child(this.message ? tr(this.message, { command: this.installCommand }) : (this.source ? this.source.split(/[\\/]/).pop() : tr("drop"))),
+              .child(this.message ? tr(this.message, { command: this.installCommand }) : (isSystem ? tr("systemAudio") : (this.source ? this.source.split(/[\\/]/).pop() : tr("drop")))),
       )
       .child(controls)
       .when(this.message === "missingYtDlp", (el) => el.child(div().absolute().bottom(52).left(8).bg(t.chrome).child(this.btn("tunr-copy", tr("copyCommand"), (cx) => { cx.write_to_clipboard(this.installCommand); this.copied = true; }, { tip: tr(this.copied ? "copied" : "copyCommand") }))))

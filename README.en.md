@@ -9,7 +9,8 @@ herdr is the herder, [tendr](https://github.com/ailazytech/tendr) tends the fire
 - **Small:** 48×16 characters by default, or medium (64×22) and large (80×27); drag it anywhere, and it comes back where you left it after a restart
 - **Black and white, or low color:** low color uses only 8 muted colors, so it doesn't pull your eye from your work
 - **Screen off:** keep just the sound and a control bar; nothing is redrawn
-- **Sources:** local files, direct links (mp4, mp3…) or YouTube and other sites supported by yt-dlp; drop a file or press 🔗 to enter a URL
+- **System audio spectrum:** press 📻 to show a live dancing ASCII spectrum of whatever this computer is playing (Spotify, browser, games...)
+- **Sources:** local files, direct links (mp4, mp3…), YouTube and other sites supported by yt-dlp, or system audio; drop a file, press 🔗 to enter a URL, or press 📻 to switch to system audio
 
 ## You need
 
@@ -35,19 +36,19 @@ The installer checks the tools and offers installation commands. In an interacti
 ## Controls
 
 The bar at the bottom of the window: play / pause, the progress bar (click to jump), volume − / +, screen on / off, black and white / low color, S / M / L, ✕ to close.
-Press 🔗 to open the URL field. An HTTP(S) URL on the clipboard is filled in and selected automatically; press Enter to play, or edit or clear it. The language setting is shared with ranchr and herdr-quota; use `tunr.language-auto`, `tunr.language-zh` or `tunr.language-en` to change it.
+Press 📻 to switch to system audio spectrum (in this mode, play / pause freezes / unfreezes the visual, while seek bar and volume are hidden). Press 🔗 to open the URL field. An HTTP(S) URL on the clipboard is filled in and selected automatically; press Enter to play, or edit or clear it. The language setting is shared with ranchr and herdr-quota; use `tunr.language-auto`, `tunr.language-zh` or `tunr.language-en` to change it.
 
-Commands (`herdr-app do tunr.<command>`, or `tunr.<command>` in `keys.json`): `toggle` (play / pause), `video` (screen on / off), `mode`, `size`, `close`.
+Commands (`herdr-app do tunr.<command>`, or `tunr.<command>` in `keys.json`): `toggle` (play / pause), `video` (screen on / off), `mode`, `size`, `system` (system audio spectrum), `close`.
 
 ## Settings
 
 `~/.config/herdr-app/mods/tunr/config.json`, optional:
 
 ```json
-{ "source": "C:/Videos/a.mp4", "size": "S", "mode": "mono", "video": true, "volume": 80, "debug": false }
+{ "source": "system", "size": "S", "mode": "mono", "video": true, "volume": 80, "debug": false }
 ```
 
-- `source`: what to play on opening; without it, the window waits for a file to be dropped
+- `source`: what to play on opening; `"system"` starts in system audio spectrum mode; without it, the window waits for a file to be dropped
 - `size`: `S`, `M`, `L`; `mode`: `mono` or `low`; `video`: `false` to only listen
 - `debug`: `true` adds an FPS button and writes what it measures to `~/.config/herdr-app/data/tunr-stats.json` every 2 seconds
 
@@ -60,6 +61,7 @@ Commands (`herdr-app do tunr.<command>`, or `tunr.<command>` in `keys.json`): `t
 
 ## Limits
 
+- System audio spectrum currently supports Windows only (captures audio from the default playback device); macOS and Linux are not supported yet
 - Pausing, seeking, changing the volume or the mode restarts the background programs, with a 0.2–0.5 s gap
 - No Spotify or podcast search; site playback depends on yt-dlp and the source's restrictions
 

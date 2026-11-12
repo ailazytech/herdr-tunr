@@ -8,8 +8,13 @@
 // 聲音是主時鐘（ffplay 的 stderr 會印目前播放位置）；影像照這個時鐘丟掉過期的幀，所以畫面不會落後聲音。
 import net from "node:net";
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { needsYtDlp } from "./source.mjs";
+import { SpectrumAnalyzer } from "./spectrum.mjs";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback) => {
@@ -40,7 +45,8 @@ const S = {
 };
 
 // ---- 來源資訊 ----
-const extracted = needsYtDlp(SOURCE);
+const isSystem = SOURCE === "system";
+const extracted = !isSystem && needsYtDlp(SOURCE);
 let videoSource = SOURCE, audioSource = SOURCE, sourceError = null;
 function resolveSource() {
   if (!extracted) return null;
@@ -58,6 +64,13 @@ function resolveSource() {
   } catch { sourceError = "resolveFailed"; return null; }
 }
 function probe() {
+  if (isSystem) {
+    if (process.platform !== "win32") {
+      sourceError = "windowsOnly";
+      return { dur: 0, hasAudio: false, hasVideo: false, w: S.cols, h: S.rows, isSystem: true };
+    }
+    return { dur: 0, hasAudio: false, hasVideo: true, w: S.cols, h: S.rows, isSystem: true };
+  }
   if (extracted) return resolveSource() ?? { dur: 0, hasAudio: false, hasVideo: false, w: 16, h: 9 };
   const r = spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height", "-of", "json", SOURCE], { encoding: "utf8", windowsHide: true });
   let info = {};
@@ -78,6 +91,7 @@ if (!SRC.hasVideo && !sourceError) S.video = false;
 
 // 在 cols×rows 裡保持比例：回傳實際的字數
 function fit() {
+  if (isSystem) return { c: S.cols, r: S.rows };
   const aspect = SRC.w / SRC.h / CELL_ASPECT; // 以字為單位的寬高比
   let c = S.cols;
   let r = Math.round(c / aspect);
@@ -89,6 +103,11 @@ function fit() {
 let client = null;
 let audio = null; // { proc }
 let video = null; // { proc, gen }
+let captureProc = null;
+let analyzer = null;
+let captureRate = 48000;
+let spectrumTimer = null;
+let lastPCMTime = 0;
 let genCounter = 0;
 let queue = []; // { pts, text }
 let startWall = 0; // 這一輪 play 開始的時間（沒有聲音時的時鐘）
@@ -102,6 +121,7 @@ const now = () => Date.now();
 const kill = (p) => { try { p?.kill(); } catch {} };
 
 function clock() {
+  if (isSystem) return 0;
   if (!S.playing) return S.pos;
   if (SRC.hasAudio && clk) return clk.pos + (now() - clk.wall) / 1000;
   // 聲音還沒開始報位置：畫面先停在起點等它（聲音 4 秒內都沒報就改用牆上時間，例如 ffplay 壞了）
@@ -114,7 +134,7 @@ function send(text) {
 }
 function sendStatus(extra = {}) {
   const pos = Math.min(clock(), S.dur || clock());
-  send("\x01" + JSON.stringify({ pos: +pos.toFixed(2), dur: +S.dur.toFixed(2), playing: S.playing, ended: S.ended, video: S.video, mode: S.mode, cols: S.cols, rows: S.rows, volume: S.volume, fps: FPS, error: sourceError, ...extra }));
+  send("\x01" + JSON.stringify({ pos: +pos.toFixed(2), dur: +S.dur.toFixed(2), playing: S.playing, ended: S.ended, video: S.video, mode: S.mode, cols: S.cols, rows: S.rows, volume: S.volume, fps: FPS, error: sourceError, isSystem, ...extra }));
 }
 
 // ---- 影像 ----
@@ -273,6 +293,83 @@ function startAudio(at) {
   });
 }
 
+// ---- 擷取系統音訊 ----
+function startCapture() {
+  if (!isSystem || captureProc || process.platform !== "win32") return;
+  analyzer = new SpectrumAnalyzer(captureRate, S.cols, S.rows);
+  const script = path.join(here, "loopback.ps1");
+  const proc = spawn("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    script,
+    "-ParentPid",
+    String(process.pid)
+  ], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+
+  captureProc = proc;
+  let headerParsed = false;
+  let leftover = Buffer.alloc(0);
+
+  proc.stdout.on("data", (chunk) => {
+    if (!headerParsed) {
+      const combined = Buffer.concat([leftover, chunk]);
+      const nl = combined.indexOf(10);
+      if (nl >= 0) {
+        const line = combined.subarray(0, nl).toString("ascii").trim();
+        const m = /^RATE\s+(\d+)$/i.exec(line);
+        if (m) {
+          captureRate = Number(m[1]) || 48000;
+          analyzer.setSampleRate(captureRate);
+        }
+        headerParsed = true;
+        const remaining = combined.subarray(nl + 1);
+        if (remaining.length > 0) {
+          analyzer.pushPCM16(remaining);
+          lastPCMTime = now();
+        }
+        return;
+      } else {
+        leftover = combined;
+        return;
+      }
+    }
+
+    analyzer.pushPCM16(chunk);
+    lastPCMTime = now();
+  });
+
+  proc.on("error", () => {});
+  proc.on("exit", () => {
+    if (captureProc === proc) captureProc = null;
+  });
+}
+
+function stopCapture() {
+  if (captureProc) {
+    try { captureProc.kill(); } catch {}
+    captureProc = null;
+  }
+  if (spectrumTimer) {
+    clearInterval(spectrumTimer);
+    spectrumTimer = null;
+  }
+}
+
+function startSpectrumLoop() {
+  if (spectrumTimer) clearInterval(spectrumTimer);
+  spectrumTimer = setInterval(() => {
+    if (!isSystem || !S.playing || !S.video || !analyzer) return;
+    if (now() - lastPCMTime > 150) {
+      analyzer.pushPCM16(Buffer.alloc(1024));
+    }
+    const frame = analyzer.render(S.mode);
+    send(frame);
+    stats.sent++;
+  }, Math.round(1000 / FPS));
+}
+
 // ---- 指令 ----
 let retried = false;
 function retryStream(at) {
@@ -285,6 +382,13 @@ function retryStream(at) {
 }
 function play(at = S.pos, retry = false) {
   if (sourceError) { sendStatus(); return; }
+  if (isSystem) {
+    S.playing = true;
+    startCapture();
+    startSpectrumLoop();
+    sendStatus();
+    return;
+  }
   if (!retry) retried = false;
   if (S.ended || (S.dur && at >= S.dur - 0.2)) { at = 0; }
   S.ended = false;
@@ -298,6 +402,11 @@ function play(at = S.pos, retry = false) {
 }
 function pause() {
   if (!S.playing) return;
+  if (isSystem) {
+    S.playing = false;
+    sendStatus();
+    return;
+  }
   S.pos = Math.min(clock(), S.dur || Infinity);
   S.playing = false;
   stopAudio();
@@ -305,6 +414,7 @@ function pause() {
   sendStatus();
 }
 function seek(to) {
+  if (isSystem) return;
   to = Math.max(0, Math.min(S.dur || to, to));
   if (S.playing) play(to);
   else { S.pos = to; S.ended = false; sendStatus(); }
@@ -318,18 +428,27 @@ function handle(m) {
     case "seek": seek(Number(m.to) || 0); break;
     case "video":
       S.video = Boolean(m.on) && SRC.hasVideo;
-      if (S.playing) { if (S.video) startVideo(clock()); else stopVideo(); }
+      if (S.playing && !isSystem) { if (S.video) startVideo(clock()); else stopVideo(); }
       sendStatus();
       break;
     case "mode":
-      if (m.mode === "mono" || m.mode === "low") { S.mode = m.mode; if (S.playing && S.video) startVideo(clock()); }
+      if (m.mode === "mono" || m.mode === "low") {
+        S.mode = m.mode;
+        if (S.playing && S.video && !isSystem) startVideo(clock());
+      }
       sendStatus();
       break;
     case "size":
-      if (m.cols > 0 && m.rows > 0) { S.cols = m.cols | 0; S.rows = m.rows | 0; if (S.playing && S.video) startVideo(clock()); }
+      if (m.cols > 0 && m.rows > 0) {
+        S.cols = m.cols | 0;
+        S.rows = m.rows | 0;
+        if (isSystem && analyzer) analyzer.setDimensions(S.cols, S.rows);
+        if (S.playing && S.video && !isSystem) startVideo(clock());
+      }
       sendStatus();
       break;
     case "volume":
+      if (isSystem) return;
       S.volume = Math.max(0, Math.min(100, Number(m.value) || 0));
       clearTimeout(volumeTimer);
       // ffplay 的音量只能在啟動時給：停一下沒有再調才重開，位置不變
@@ -388,6 +507,7 @@ setInterval(() => { if (S.playing) sendStatus(); }, 250);
 function shutdown(code) {
   stopAudio();
   stopVideo();
+  stopCapture();
   try { server.close(); } catch {}
   try { client?.destroy(); } catch {}
   setTimeout(() => process.exit(code), 50);
@@ -395,4 +515,8 @@ function shutdown(code) {
 process.on("SIGTERM", () => shutdown(0));
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGHUP", () => shutdown(0));
-process.on("exit", () => { kill(audio?.proc); kill(video?.proc); });
+process.on("exit", () => {
+  kill(audio?.proc);
+  kill(video?.proc);
+  if (captureProc) { try { captureProc.kill(); } catch {} }
+});
