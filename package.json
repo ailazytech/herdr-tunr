@@ -1,0 +1,9 @@
+{
+  "name": "herdr-tunr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "install-mod": "node install.mjs"
+  }
+}

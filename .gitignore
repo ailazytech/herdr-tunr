@@ -1,0 +1,5 @@
+docs/
+mods/tunr/config.json
+mods/tunr/gpui-kit.d.ts
+mods/tunr/jsconfig.json
+node_modules/
