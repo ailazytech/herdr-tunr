@@ -52,6 +52,8 @@ node herdr-tunr/install.mjs
 - `size`：`S`、`M`、`L`；`mode`：`mono`（黑白）、`low`（低彩度）；`video`：`false` 就是只聽聲音
 - `debug`：`true` 時多一顆 FPS 按鈕，並每 2 秒把量到的數字寫到 `~/.config/herdr-app/data/tunr-stats.json`
 
+在視窗裡調整音量、黑白／低彩度、尺寸、開關畫面，或是切換來源（拖入檔案、輸入網址、切換系統音訊），都會自動記在 `~/.config/herdr-app/data/tunr/settings.json`（不記錄播放位置秒數）；`config.json` 是手寫預設值（`install.mjs` 更新時也不會覆蓋），想回到預設值只要刪掉 `settings.json` 即可。
+
 ## 運作方式
 
 - 畫面在背景引擎（`tunr.mjs`）裡算好：ffmpeg 把影像縮成字元格轉成 ASCII，ffplay 放聲音，再用本機 TCP（`127.0.0.1`）一幀一幀送給視窗；視窗只負責畫和控制

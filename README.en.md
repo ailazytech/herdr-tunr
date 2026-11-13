@@ -52,6 +52,8 @@ Commands (`herdr-app do tunr.<command>`, or `tunr.<command>` in `keys.json`): `t
 - `size`: `S`, `M`, `L`; `mode`: `mono` or `low`; `video`: `false` to only listen
 - `debug`: `true` adds an FPS button and writes what it measures to `~/.config/herdr-app/data/tunr-stats.json` every 2 seconds
 
+Changes made in the window—volume, mode (`mono`/`low`), size, video on/off, and the active source (dropped file, URL, or system audio)—are automatically saved to `~/.config/herdr-app/data/tunr/settings.json` (playback position is not saved); `config.json` holds your manual defaults (`install.mjs` never overwrites it), and deleting `settings.json` resets back to those defaults.
+
 ## How it works
 
 - The picture is made by a background engine (`tunr.mjs`): ffmpeg scales the video to a grid of characters and turns it into ASCII, ffplay plays the sound, and frames go to the window one by one over local TCP (`127.0.0.1`); the window only draws and controls

@@ -13,6 +13,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, openOverlay, closeOverlay, appHome, hc, shared, setShared, nextCommand, theme, exec } from "herdr";
 import { t as translate, language, initLanguage } from "./i18n.js";
 import { windowSize, doesFit, nextFitSize, canOpenVideo, bestFitSize, SIZES, SIZE_ORDER, CHAR_W, LINE_H, PAD, CONTROLS_H, AUDIO_ONLY_H } from "./layout.js";
+import { mergeConfigText, parseConfigText, resolveStartupConfig } from "./config.js";
 import { fps_monitor } from "gpui-fps";
 import net from "net";
 import { readFile, writeFile } from "fs/promises";
@@ -25,6 +26,7 @@ const MONO_COLOR = "#c8c8c8";
 const tr = (key, vars = {}) => translate(key, vars, language(shared));
 
 const dir = () => `${appHome()}/mods/${MOD}`;
+const settingsPath = () => `${appHome()}/data/${MOD}/settings.json`;
 const now = () => (globalThis.performance?.now ? globalThis.performance.now() : Date.now());
 // 引擎送來的都是 ASCII：自己把位元組轉成文字
 const ascii = (u8) => {
@@ -37,9 +39,9 @@ const mmss = (t) => {
   return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
 };
 
-async function readConfig() {
+async function readJsonSafe(path) {
   try {
-    return JSON.parse(await readFile(`${dir()}/config.json`, "utf8"));
+    return parseConfigText(await readFile(path, "utf8"));
   } catch {
     return {};
   }
@@ -69,14 +71,14 @@ export default class Tunr extends View {
     this.cfg = p.cfg ?? {};
     this.source = p.source ?? null;
     this.sizeKey = p.size ?? "S";
-    this.prevSizeKey = this.sizeKey;
     this.mode = p.mode ?? "mono";
     this.video = p.video !== false;
-    this.prevVideo = this.video;
     this.volume = p.volume ?? 80;
     this.debug = Boolean(p.debug);
     this.notice = null;
     this.noticeToken = 0;
+    this.saveToken = 0;
+    this.savePending = false;
     this.pos = p.at ? { x: p.at.x, y: p.at.y } : null;
     this.bounds = p.bounds ? { ...p.bounds } : null;
     if (!this.pos) {
@@ -107,8 +109,11 @@ export default class Tunr extends View {
     this.handoff = false;
     this.closed = false;
     this.pendingFrame = false;
-    this.st = { t0: now(), received: 0, shown: 0, dropped: 0, renders: 0, jsMs: 0, segs: 0, rowsDrawn: 0 };
-    this.win = { received: 0, shown: 0, dropped: 0, renders: 0, jsMs: 0, segs: 0, since: now() };
+    if (this.debug) {
+      const t = now();
+      this.st = { t0: t, received: 0, shown: 0, dropped: 0, renders: 0, jsMs: 0, segs: 0, rowsDrawn: 0 };
+      this.win = { received: 0, shown: 0, dropped: 0, renders: 0, jsMs: 0, segs: 0, since: t };
+    }
     if (this.source) cx.spawn(async (cx) => this.connectEngine(cx, p.resume ?? null));
     cx.spawn(async (cx) => {
       await cx.sleep(50);
@@ -120,7 +125,7 @@ export default class Tunr extends View {
         if (this.closed) return;
         if (c === "toggle") this.send({ cmd: "toggle" });
         if (c === "video") await this.setVideo(cx, !this.video);
-        if (c === "mode") this.setMode(!this.mode || this.mode === "mono" ? "low" : "mono");
+        if (c === "mode") this.setMode(cx, !this.mode || this.mode === "mono" ? "low" : "mono");
         if (c === "size") await this.cycleSize(cx);
         if (c === "system") this.loadSource(cx, "system");
         if (c === "close") closeOverlay(props().overlay);
@@ -135,7 +140,9 @@ export default class Tunr extends View {
 
   // ---- 啟動器 ----
   async launch(cx, p) {
-    const cfg = await readConfig();
+    const rawCfg = await readJsonSafe(`${dir()}/config.json`);
+    const rawSettings = await readJsonSafe(settingsPath());
+    const cfg = resolveStartupConfig(rawCfg, rawSettings);
     // 視窗已經開著：這次 mod.open 當作關掉它
     const open = shared("tunr.window");
     if (open && open !== p.overlay) {
@@ -258,11 +265,13 @@ export default class Tunr extends View {
   }
 
   onFrame(text) {
-    if (this.pendingFrame) { this.st.dropped++; this.win.dropped++; }
+    if (this.debug) {
+      if (this.pendingFrame) { this.st.dropped++; this.win.dropped++; }
+      this.st.received++;
+      this.win.received++;
+    }
     this.frame = text;
     this.pendingFrame = true;
-    this.st.received++;
-    this.win.received++;
   }
 
   onStatus(cx, s) {
@@ -315,6 +324,45 @@ export default class Tunr extends View {
     });
   }
 
+  scheduleSave(cx) {
+    if (!this.isWindow) return;
+    this.savePending = true;
+    const token = ++this.saveToken;
+    cx.spawn(async (cx) => {
+      await cx.sleep(500);
+      if (this.saveToken === token && this.savePending && !this.closed) {
+        await this.flushConfig();
+      }
+    });
+  }
+
+  async flushConfig() {
+    if (!this.isWindow || !this.savePending) return;
+    this.savePending = false;
+    const updates = {
+      volume: this.volume,
+      mode: this.mode,
+      size: this.sizeKey,
+      video: this.video,
+      ...(this.source ? { source: this.source } : {}),
+    };
+    try {
+      const path = settingsPath();
+      let existing = null;
+      try {
+        existing = await readFile(path, "utf8");
+      } catch (e) {
+        const msg = String(e?.message ?? e ?? "");
+        const isNotFound = e?.code === "ENOENT" || /ENOENT|no such file|cannot find|not found|os error 2\b/i.test(msg);
+        if (!isNotFound) return;
+      }
+      const next = mergeConfigText(existing, updates);
+      if (next !== null && next !== existing) {
+        await writeFile(path, next, "utf8");
+      }
+    } catch {}
+  }
+
   async ensureFit(cx) {
     if (this.closed || !this.isWindow) return;
     const curPos = await this.getCurrentPos();
@@ -327,6 +375,7 @@ export default class Tunr extends View {
         this.sizeKey = best;
         const { cols, rows } = SIZES[this.sizeKey];
         this.send({ cmd: "size", cols, rows });
+        this.scheduleSave(cx);
         await this.resize(cx);
       }
     }
@@ -345,11 +394,13 @@ export default class Tunr extends View {
     this.video = on;
     this.send({ cmd: "video", on });
     if (!on) { this.frame = ""; this.pendingFrame = false; }
+    this.scheduleSave(cx);
     await this.resize(cx);
   }
-  setMode(m) {
+  setMode(cx, m) {
     this.mode = m;
     this.send({ cmd: "mode", mode: m });
+    this.scheduleSave(cx);
   }
   async cycleSize(cx) {
     const curPos = await this.getCurrentPos();
@@ -362,11 +413,13 @@ export default class Tunr extends View {
       this.sizeKey = fit.sizeKey;
       const { cols, rows } = SIZES[this.sizeKey];
       this.send({ cmd: "size", cols, rows });
+      this.scheduleSave(cx);
       await this.resize(cx);
     }
   }
   // 同一個 key 再開一次 = 原地換成新大小；引擎留著，新視窗接回同一個埠
   async resize(cx) {
+    if (this.savePending) await this.flushConfig();
     const { width, height } = windowSize(this.sizeKey, this.video);
     this.handoff = true;
     const spec = {
@@ -381,9 +434,10 @@ export default class Tunr extends View {
     const id = openOverlay(spec);
     setShared("tunr.window", id);
   }
-  setVolume(v) {
+  setVolume(cx, v) {
     this.volume = Math.max(0, Math.min(100, v));
     this.send({ cmd: "volume", value: this.volume });
+    this.scheduleSave(cx);
   }
   seekAt(e, cx) {
     const w = e.bounds?.width ?? 0;
@@ -396,6 +450,7 @@ export default class Tunr extends View {
     this.frame = "";
     this.message = "connecting";
     this.status = { pos: 0, dur: 0, playing: false };
+    this.scheduleSave(cx);
     try { this.send({ cmd: "quit" }); this.sock?.close(); } catch {}
     this.sock = null;
     await this.connectEngine(cx, null);
@@ -403,7 +458,9 @@ export default class Tunr extends View {
 
   async close(cx) {
     this.closed = true;
+    if (!this.isWindow) return;
     if (this.handoff) return; // 換大小：引擎留給新視窗
+    if (this.savePending) await this.flushConfig();
     try { this.send({ cmd: "quit" }); } catch {}
     try { this.sock?.close(); } catch {}
     try { setShared("tunr.window", null); } catch {}
@@ -450,23 +507,25 @@ export default class Tunr extends View {
     const low = this.mode === "low";
     let segs = 0;
     const out = rows.map((r) => {
-      if (!low) { segs++; return div().whitespace_nowrap().child(r); }
+      if (!low) { if (this.debug) segs++; return div().whitespace_nowrap().child(r); }
       const parts = r.split("|");
-      segs += parts.length;
+      if (this.debug) segs += parts.length;
       return h_flex().whitespace_nowrap().children(parts.map((s) => div().text_color(PALETTE[s.charCodeAt(0) - 48] ?? MONO_COLOR).child(s.slice(1))));
     });
-    this.lastSegs = segs;
+    if (this.debug) this.lastSegs = segs;
     return out;
   }
 
   render(cx) {
     if (!this.isWindow) return div().p(8).child("tunr…");
-    const t0 = now();
+    const t0 = this.debug ? now() : 0;
     const t = theme();
-    if (this.pendingFrame) { this.st.shown++; this.win.shown++; }
+    if (this.debug) {
+      if (this.pendingFrame) { this.st.shown++; this.win.shown++; }
+      this.st.renders++;
+      this.win.renders++;
+    }
     this.pendingFrame = false;
-    this.st.renders++;
-    this.win.renders++;
     const { cols, rows } = SIZES[this.sizeKey];
     const s = this.status;
     const isSystem = this.source === "system" || Boolean(s.isSystem);
@@ -480,7 +539,7 @@ export default class Tunr extends View {
           .when(Boolean(this.message), (el) => el.child(div().text_color(t.dim).child(tr(this.message, { command: this.installCommand }))))
           .child(v_flex().children(this.frameRows()))
       : null;
-    this.win.segs += this.lastSegs ?? 0;
+    if (this.debug) this.win.segs += this.lastSegs ?? 0;
 
     const seekBar = div().id("tunr-seek").flex_1().h(8).rounded(3).bg(t.border).cursor_pointer().relative().overflow_hidden()
       .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.seekAt(e, cx); })
@@ -504,9 +563,9 @@ export default class Tunr extends View {
         h_flex().gap(3).items_center().whitespace_nowrap()
           .when(!isSystem, (el) =>
             el
-              .child(this.btn("tunr-vol-", "−", () => this.setVolume(this.volume - 10), { tip: tr("volumeDown") }))
+              .child(this.btn("tunr-vol-", "−", (cx) => this.setVolume(cx, this.volume - 10), { tip: tr("volumeDown") }))
               .child(div().w(20).flex_none().text_color(t.foreground).child(`${this.volume}`))
-              .child(this.btn("tunr-vol+", "+", () => this.setVolume(this.volume + 10), { tip: tr("volumeUp") }))
+              .child(this.btn("tunr-vol+", "+", (cx) => this.setVolume(cx, this.volume + 10), { tip: tr("volumeUp") }))
           )
           .child(div().flex_1())
           .child(this.btn("tunr-system", "📻", (cx) => {
@@ -526,7 +585,7 @@ export default class Tunr extends View {
             }
           }, { tip: tr("url") }))
           .child(this.btn("tunr-video", tr("video"), (cx) => this.setVideo(cx, !this.video), { on: this.video, tip: tr("videoHelp") }))
-          .child(this.btn("tunr-mode", tr(this.mode === "low" ? "low" : "mono"), () => this.setMode(this.mode === "low" ? "mono" : "low"), { tip: tr("mode") }))
+          .child(this.btn("tunr-mode", tr(this.mode === "low" ? "low" : "mono"), (cx) => this.setMode(cx, this.mode === "low" ? "mono" : "low"), { tip: tr("mode") }))
           .child(this.btn("tunr-size", this.sizeKey, (cx) => this.cycleSize(cx), { tip: tr("size") }))
           .when(this.debug, (el) => el.child(this.btn("tunr-fps", "FPS", () => { this.showFps = !this.showFps; }, { on: this.showFps, tip: tr("fps") })))
           .child(this.btn("tunr-close", "✕", () => closeOverlay(props().overlay), { tip: tr("close") })),
@@ -564,8 +623,11 @@ export default class Tunr extends View {
       .when(this.message === "missingYtDlp", (el) => el.child(div().absolute().bottom(52).left(8).bg(t.chrome).child(this.btn("tunr-copy", tr("copyCommand"), (cx) => { cx.write_to_clipboard(this.installCommand); this.copied = true; }, { tip: tr(this.copied ? "copied" : "copyCommand") }))))
       .when(this.showUrl, (el) => el.child(div().absolute().top(4).left(4).right(4).p(6).bg(t.chrome).child(Input.new(this.urlInput).w_full().text_size(12).text_color(t.foreground))))
       .when(this.debug && this.showFps, (el) => el.child(div().absolute().top(4).right(4).w(150).h(110).child(div().relative().size_full().child(fps_monitor()))));
-    this.st.jsMs += now() - t0;
-    this.win.jsMs += now() - t0;
+    if (this.debug) {
+      const dt = now() - t0;
+      this.st.jsMs += dt;
+      this.win.jsMs += dt;
+    }
     return root;
   }
 }
