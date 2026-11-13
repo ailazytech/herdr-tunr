@@ -36,9 +36,9 @@ node herdr-tunr/install.mjs
 ## 操作
 
 視窗下方的控制列：播放／暫停、進度條（點哪裡跳到哪裡）、音量 −／+、開關畫面、黑白／低彩、S／M／L、✕ 關閉。
-按 📻 切換至電腦系統音訊頻譜（此模式下播放／暫停為凍結／恢復，進度條與音量會隱藏）。按 🔗 開啟網址輸入框；剪貼簿若有 HTTP(S) 網址，會自動填入並選取，按 Enter 就能播放，也可以修改或清掉。介面語言與 ranchr、herdr-quota 共用；可使用 `tunr.language-auto`、`tunr.language-zh` 或 `tunr.language-en` 切換。
+按 📻 切換至電腦系統音訊頻譜（進度條與音量會隱藏；Windows 上若偵測到目前系統媒體工作階段，會顯示「歌名 — 演出者」，播放／暫停會控制該媒體，並依媒體支援度顯示 ⏮／⏭ 上／下一首；無媒體工作階段時播放／暫停為凍結／恢復頻譜）。按 🔗 開啟網址輸入框；剪貼簿若有 HTTP(S) 網址，會自動填入並選取，按 Enter 就能播放，也可以修改或清掉。介面語言與 ranchr、herdr-quota 共用；可使用 `tunr.language-auto`、`tunr.language-zh` 或 `tunr.language-en` 切換。
 
-指令（`herdr-app do tunr.<指令>`，或在 `keys.json` 綁 `tunr.<指令>`）：`toggle`（播放／暫停）、`video`（開關畫面）、`mode`（黑白／低彩）、`size`（換尺寸）、`system`（切換系統音訊）、`close`。
+指令（`herdr-app do tunr.<指令>`，或在 `keys.json` 綁 `tunr.<指令>`）：`toggle`（播放／暫停）、`prev`（上一首，系統音訊模式）、`next`（下一首，系統音訊模式）、`video`（開關畫面）、`mode`（黑白／低彩）、`size`（換尺寸）、`system`（切換系統音訊）、`close`。
 
 ## 設定
 

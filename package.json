@@ -5,6 +5,6 @@
   "type": "module",
   "scripts": {
     "install-mod": "node install.mjs",
-    "test": "node --test test/i18n.test.mjs test/install.test.mjs test/source.test.mjs test/spectrum.test.mjs test/layout.test.mjs test/config.test.mjs"
+    "test": "node --test test/i18n.test.mjs test/install.test.mjs test/source.test.mjs test/spectrum.test.mjs test/layout.test.mjs test/config.test.mjs test/media.test.mjs"
   }
 }

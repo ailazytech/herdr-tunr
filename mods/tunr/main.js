@@ -14,6 +14,7 @@ import { props, openOverlay, closeOverlay, appHome, hc, shared, setShared, nextC
 import { t as translate, language, initLanguage } from "./i18n.js";
 import { windowSize, doesFit, nextFitSize, canOpenVideo, bestFitSize, SIZES, SIZE_ORDER, CHAR_W, LINE_H, PAD, CONTROLS_H, AUDIO_ONLY_H } from "./layout.js";
 import { mergeConfigText, parseConfigText, resolveStartupConfig } from "./config.js";
+import { formatMediaLabel, mediaButtonStates } from "./media.mjs";
 import { fps_monitor } from "gpui-fps";
 import net from "net";
 import { readFile, writeFile } from "fs/promises";
@@ -124,6 +125,8 @@ export default class Tunr extends View {
         const c = await nextCommand();
         if (this.closed) return;
         if (c === "toggle") this.send({ cmd: "toggle" });
+        if (c === "next") this.send({ cmd: "mediaNext" });
+        if (c === "prev") this.send({ cmd: "mediaPrev" });
         if (c === "video") await this.setVideo(cx, !this.video);
         if (c === "mode") this.setMode(cx, !this.mode || this.mode === "mono" ? "low" : "mono");
         if (c === "size") await this.cycleSize(cx);
@@ -281,7 +284,8 @@ export default class Tunr extends View {
     if (s.error) this.message = s.error;
     // 關畫面時只在畫面上看得到的東西變了才重畫：時間（每秒）、播放狀態等，不然每 250 毫秒一次沒有意義
     const sec = Math.floor(s.pos ?? 0);
-    const changed = sec !== this.shownSecond || before.playing !== s.playing || before.video !== s.video || before.mode !== s.mode || before.volume !== s.volume || before.ended !== s.ended || s.hello;
+    const mediaChanged = JSON.stringify(before.media ?? null) !== JSON.stringify(s.media ?? null);
+    const changed = sec !== this.shownSecond || before.playing !== s.playing || before.video !== s.video || before.mode !== s.mode || before.volume !== s.volume || before.ended !== s.ended || mediaChanged || s.hello;
     if (s.hello) {
       this.hello = s;
       // 引擎回報的設定為準（重新連上 handoff 的引擎時）
@@ -491,14 +495,16 @@ export default class Tunr extends View {
   // ---- 畫 ----
   btn(id, label, onClick, opts = {}) {
     const t = theme();
+    const disabled = Boolean(opts.disabled);
     return div()
-      .id(id).px(5).py(1).rounded(4).cursor_pointer()
-      .text_color(opts.on ? t.foreground : t.muted)
-      .when(opts.on, (el) => el.bg(t.raised))
-      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .id(id).px(5).py(1).rounded(4)
+      .when(!disabled, (el) => el.cursor_pointer())
+      .text_color(disabled ? t.dim : (opts.on ? t.foreground : t.muted))
+      .when(opts.on && !disabled, (el) => el.bg(t.raised))
+      .when(!disabled, (el) => el.hover((s) => s.bg(t.hover).text_color(t.foreground)))
       .when(Boolean(opts.tip), (el) => el.tooltip(opts.tip))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { onClick(cx); cx.notify(); })
+      .when(!disabled, (el) => el.on_click((_e, cx) => { onClick(cx); cx.notify(); }))
       .child(label);
   }
 
@@ -529,6 +535,10 @@ export default class Tunr extends View {
     const { cols, rows } = SIZES[this.sizeKey];
     const s = this.status;
     const isSystem = this.source === "system" || Boolean(s.isSystem);
+    const media = isSystem ? (s.media ?? null) : null;
+    const ms = isSystem ? mediaButtonStates(media) : { hasSession: false, isPlaying: false, canToggle: true, canPrev: false, canNext: false };
+    const maxMediaChars = this.sizeKey === "S" ? 26 : this.sizeKey === "M" ? 40 : 54;
+    const mediaLabel = isSystem ? formatMediaLabel(media, tr("systemAudio"), maxMediaChars) : "";
     const frac = s.dur ? Math.max(0, Math.min(1, (s.pos ?? 0) / s.dur)) : 0;
 
     const screen = this.video
@@ -548,15 +558,24 @@ export default class Tunr extends View {
     const controls = v_flex().gap(4).px(PAD).py(4).text_size(11).text_color(t.muted).bg(t.chrome)
       .child(
         h_flex().gap(6).items_center()
-          .child(this.btn("tunr-play", s.playing ? "⏸" : "▶", () => this.send({ cmd: "toggle" }), { tip: tr(s.playing ? "pause" : "play") }))
+          .child(
+            isSystem && ms.hasSession
+              ? this.btn("tunr-play", ms.isPlaying ? "⏸" : "▶", () => this.send({ cmd: "mediaToggle" }), { tip: tr(ms.isPlaying ? "pause" : "play"), disabled: !ms.canToggle })
+              : this.btn("tunr-play", s.playing ? "⏸" : "▶", () => this.send({ cmd: "toggle" }), { tip: tr(s.playing ? "pause" : "play") })
+          )
+          .when(isSystem && ms.hasSession, (el) =>
+            el
+              .child(this.btn("tunr-prev", "⏮", () => this.send({ cmd: "mediaPrev" }), { tip: tr("prevTrack"), disabled: !ms.canPrev }))
+              .child(this.btn("tunr-next", "⏭", () => this.send({ cmd: "mediaNext" }), { tip: tr("nextTrack"), disabled: !ms.canNext }))
+          )
           .when(!isSystem, (el) =>
             el
               .child(seekBar)
               .child(div().flex_none().child(`${mmss(s.pos)}/${mmss(s.dur)}`))
           )
           .when(isSystem, (el) =>
-            // 關畫面時上方那行已經寫著「電腦的聲音」，這裡留空當間隔
-            el.child(div().flex_1().text_color(t.dim).child(this.video ? tr("systemAudio") : ""))
+            // 關畫面時上方那行已經寫著歌名或「電腦的聲音」，這裡留空當間隔
+            el.child(div().flex_1().min_w(0).overflow_hidden().whitespace_nowrap().text_color(t.dim).child(this.video ? mediaLabel : ""))
           ),
       )
       .child(
@@ -608,7 +627,7 @@ export default class Tunr extends View {
         this.video
           ? v_flex().flex_1().items_center().justify_center().p(PAD).child(screen)
           : v_flex().h(AUDIO_ONLY_H).px(PAD).justify_center().text_size(10).text_color(t.dim)
-              .child(this.notice ? div().text_color(t.accent ?? "#e3814f").child(this.notice) : (this.message ? tr(this.message, { command: this.installCommand }) : (isSystem ? tr("systemAudio") : (this.source ? this.source.split(/[\\/]/).pop() : tr("drop"))))),
+              .child(this.notice ? div().text_color(t.accent ?? "#e3814f").child(this.notice) : (this.message ? tr(this.message, { command: this.installCommand }) : (isSystem ? mediaLabel : (this.source ? this.source.split(/[\\/]/).pop() : tr("drop"))))),
       )
       .child(controls)
       .when(Boolean(this.video && this.notice), (el) =>

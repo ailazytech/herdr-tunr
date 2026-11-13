@@ -36,9 +36,9 @@ The installer checks the tools and offers installation commands. In an interacti
 ## Controls
 
 The bar at the bottom of the window: play / pause, the progress bar (click to jump), volume − / +, screen on / off, black and white / low color, S / M / L, ✕ to close.
-Press 📻 to switch to system audio spectrum (in this mode, play / pause freezes / unfreezes the visual, while seek bar and volume are hidden). Press 🔗 to open the URL field. An HTTP(S) URL on the clipboard is filled in and selected automatically; press Enter to play, or edit or clear it. The language setting is shared with ranchr and herdr-quota; use `tunr.language-auto`, `tunr.language-zh` or `tunr.language-en` to change it.
+Press 📻 to switch to system audio spectrum (seek bar and volume are hidden; on Windows, when an active system media session is detected, "Title — Artist" is shown, play / pause controls that media, and ⏮ / ⏭ buttons appear when supported; when no media session is active, play / pause freezes / unfreezes the visual). Press 🔗 to open the URL field. An HTTP(S) URL on the clipboard is filled in and selected automatically; press Enter to play, or edit or clear it. The language setting is shared with ranchr and herdr-quota; use `tunr.language-auto`, `tunr.language-zh` or `tunr.language-en` to change it.
 
-Commands (`herdr-app do tunr.<command>`, or `tunr.<command>` in `keys.json`): `toggle` (play / pause), `video` (screen on / off), `mode`, `size`, `system` (system audio spectrum), `close`.
+Commands (`herdr-app do tunr.<command>`, or `tunr.<command>` in `keys.json`): `toggle` (play / pause), `prev` (previous track in system audio mode), `next` (next track in system audio mode), `video` (screen on / off), `mode`, `size`, `system` (system audio spectrum), `close`.
 
 ## Settings
 

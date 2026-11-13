@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { needsYtDlp } from "./source.mjs";
 import { SpectrumAnalyzer } from "./spectrum.mjs";
+import { parseMediaLine } from "./media.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -104,6 +105,8 @@ let client = null;
 let audio = null; // { proc }
 let video = null; // { proc, gen }
 let captureProc = null;
+let mediaProc = null;
+let currentMedia = null;
 let analyzer = null;
 let captureRate = 48000;
 let spectrumTimer = null;
@@ -134,7 +137,7 @@ function send(text) {
 }
 function sendStatus(extra = {}) {
   const pos = Math.min(clock(), S.dur || clock());
-  send("\x01" + JSON.stringify({ pos: +pos.toFixed(2), dur: +S.dur.toFixed(2), playing: S.playing, ended: S.ended, video: S.video, mode: S.mode, cols: S.cols, rows: S.rows, volume: S.volume, fps: FPS, error: sourceError, isSystem, ...extra }));
+  send("\x01" + JSON.stringify({ pos: +pos.toFixed(2), dur: +S.dur.toFixed(2), playing: S.playing, ended: S.ended, video: S.video, mode: S.mode, cols: S.cols, rows: S.rows, volume: S.volume, fps: FPS, error: sourceError, isSystem, ...(isSystem && currentMedia ? { media: currentMedia } : {}), ...extra }));
 }
 
 // ---- 影像 ----
@@ -344,6 +347,48 @@ function startCapture() {
   proc.on("exit", () => {
     if (captureProc === proc) captureProc = null;
   });
+
+  startMediaWatch();
+}
+
+function startMediaWatch() {
+  if (!isSystem || mediaProc || process.platform !== "win32") return;
+  const script = path.join(here, "media.ps1");
+  const proc = spawn("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    script,
+    "-ParentPid",
+    String(process.pid),
+  ], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+
+  mediaProc = proc;
+  let buf = "";
+  proc.stdout.setEncoding("utf8");
+  proc.stdout.on("data", (chunk) => {
+    buf += chunk;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      const parsed = parseMediaLine(line);
+      if (parsed) {
+        currentMedia = parsed;
+        sendStatus();
+      }
+    }
+  });
+  proc.on("error", () => {});
+  proc.on("exit", () => {
+    if (mediaProc === proc) mediaProc = null;
+  });
+}
+
+function sendMediaCommand(cmd) {
+  if (!mediaProc || !mediaProc.stdin || mediaProc.stdin.destroyed) return;
+  try { mediaProc.stdin.write(cmd + "\n"); } catch {}
 }
 
 function stopCapture() {
@@ -351,6 +396,12 @@ function stopCapture() {
     try { captureProc.kill(); } catch {}
     captureProc = null;
   }
+  if (mediaProc) {
+    try { mediaProc.stdin?.end(); } catch {}
+    try { mediaProc.kill(); } catch {}
+    mediaProc = null;
+  }
+  currentMedia = null;
   if (spectrumTimer) {
     clearInterval(spectrumTimer);
     spectrumTimer = null;
@@ -424,7 +475,18 @@ function handle(m) {
   switch (m.cmd) {
     case "play": play(); break;
     case "pause": pause(); break;
-    case "toggle": S.playing ? pause() : play(); break;
+    case "toggle":
+      if (isSystem && currentMedia && currentMedia.status !== "none") {
+        sendMediaCommand("toggle");
+      } else {
+        S.playing ? pause() : play();
+      }
+      break;
+    case "mediaToggle": sendMediaCommand("toggle"); break;
+    case "mediaPlay": sendMediaCommand("play"); break;
+    case "mediaPause": sendMediaCommand("pause"); break;
+    case "mediaNext": sendMediaCommand("next"); break;
+    case "mediaPrev": sendMediaCommand("prev"); break;
     case "seek": seek(Number(m.to) || 0); break;
     case "video":
       S.video = Boolean(m.on) && SRC.hasVideo;
@@ -519,4 +581,5 @@ process.on("exit", () => {
   kill(audio?.proc);
   kill(video?.proc);
   if (captureProc) { try { captureProc.kill(); } catch {} }
+  if (mediaProc) { try { mediaProc.kill(); } catch {} }
 });
