@@ -1,6 +1,8 @@
 // Audio spectrum analyzer: FFT, logarithmic frequency bands, and ASCII rendering.
 // Pure JavaScript, zero external dependencies.
 
+import { stepDecayLevels } from "./eq.mjs";
+
 export const FFT_SIZE = 2048;
 
 export function createFFT(size = FFT_SIZE) {
@@ -62,8 +64,9 @@ export function getBandBins(cols, sampleRate, fftSize = FFT_SIZE, minFreq = 40, 
   const bands = [];
   const binFreq = sampleRate / fftSize;
   const maxBin = Math.floor(fftSize / 2);
+  const effectiveMax = Math.max(minFreq * 1.5, Math.min(maxFreq, sampleRate * 0.46));
   const logMin = Math.log10(minFreq);
-  const logMax = Math.log10(maxFreq);
+  const logMax = Math.log10(effectiveMax);
 
   for (let c = 0; c < cols; c++) {
     const fLow = Math.pow(10, logMin + (logMax - logMin) * (c / cols));
@@ -71,6 +74,7 @@ export function getBandBins(cols, sampleRate, fftSize = FFT_SIZE, minFreq = 40, 
     let binStart = Math.floor(fLow / binFreq);
     let binEnd = Math.ceil(fHigh / binFreq);
     if (binStart < 1) binStart = 1;
+    if (binStart >= maxBin) binStart = Math.max(1, maxBin - 1);
     if (binEnd <= binStart) binEnd = binStart + 1;
     if (binEnd > maxBin) binEnd = maxBin;
     bands.push({ col: c, binStart, binEnd, fLow, fHigh, centerFreq: Math.sqrt(fLow * fHigh) });
@@ -129,6 +133,8 @@ export class SpectrumAnalyzer {
     this.sampleRate = sampleRate;
     this.cols = cols;
     this.rows = rows;
+    this.minFreq = minFreq;
+    this.maxFreq = maxFreq;
     this.fft = createFFT(FFT_SIZE);
     this.bands = getBandBins(cols, sampleRate, FFT_SIZE, minFreq, maxFreq);
     this.ring = new Float32Array(FFT_SIZE * 4);
@@ -136,26 +142,35 @@ export class SpectrumAnalyzer {
     this.totalSamples = 0;
     this.real = new Float32Array(FFT_SIZE);
     this.imag = new Float32Array(FFT_SIZE);
+    this.mags = new Float32Array(FFT_SIZE / 2);
+    this.ringSlice = new Float32Array(FFT_SIZE);
     this.heights = new Float32Array(cols);
     this.prevHeights = new Float32Array(cols);
+    this.normHeights = new Float32Array(cols);
+    this.prevNormHeights = new Float32Array(cols);
     this.minDB = -60;
     this.maxDB = -6;
     this.pcmRemainder = null;
   }
 
-  setDimensions(cols, rows) {
+  setDimensions(cols, rows = this.rows) {
     if (this.cols === cols && this.rows === rows) return;
+    const colsChanged = this.cols !== cols;
     this.cols = cols;
     this.rows = rows;
-    this.bands = getBandBins(cols, this.sampleRate, FFT_SIZE);
-    this.heights = new Float32Array(cols);
-    this.prevHeights = new Float32Array(cols);
+    if (colsChanged) {
+      this.bands = getBandBins(cols, this.sampleRate, FFT_SIZE, this.minFreq, this.maxFreq);
+      this.heights = new Float32Array(cols);
+      this.prevHeights = new Float32Array(cols);
+      this.normHeights = new Float32Array(cols);
+      this.prevNormHeights = new Float32Array(cols);
+    }
   }
 
   setSampleRate(rate) {
     if (this.sampleRate === rate) return;
     this.sampleRate = rate;
-    this.bands = getBandBins(this.cols, rate, FFT_SIZE);
+    this.bands = getBandBins(this.cols, rate, FFT_SIZE, this.minFreq, this.maxFreq);
   }
 
   pushPCM16(buf) {
@@ -225,6 +240,96 @@ export class SpectrumAnalyzer {
     }
 
     return this.heights;
+  }
+
+  /**
+   * 依傳入的 Float32Array 樣本視窗計算各頻帶正規化高度（0..1），不產生 ASCII 畫面。
+   * @param {Float32Array} samples
+   * @param {number} [decayFactor=0.75]
+   * @returns {Float32Array}
+   */
+  computeNormalizedHeightsFromSamples(samples, decayFactor = 0.75) {
+    const size = FFT_SIZE;
+    const len = samples ? Math.min(size, samples.length) : 0;
+    let rms = 0;
+
+    for (let i = 0; i < size; i++) {
+      const val = i < len ? samples[i] : 0;
+      rms += val * val;
+      this.real[i] = val * this.fft.window[i];
+      this.imag[i] = 0;
+    }
+    rms = Math.sqrt(rms / size);
+
+    if (rms < 0.001) {
+      stepDecayLevels(this.prevNormHeights, decayFactor, 0.05);
+      this.normHeights.set(this.prevNormHeights);
+      return this.normHeights;
+    }
+
+    this.fft.transform(this.real, this.imag);
+
+    const mags = this.mags;
+    const scale = 2 / size;
+    const half = size / 2;
+    for (let i = 0; i < half; i++) {
+      const re = this.real[i];
+      const im = this.imag[i];
+      mags[i] = Math.sqrt(re * re + im * im) * scale;
+    }
+
+    const minDb = -66;
+    const range = -10 - minDb;
+    for (let c = 0; c < this.cols; c++) {
+      const { binStart, binEnd } = this.bands[c];
+      let maxVal = 0;
+      for (let b = binStart; b < binEnd; b++) {
+        if (mags[b] > maxVal) maxVal = mags[b];
+      }
+      const dB = 20 * Math.log10(maxVal + 1e-6);
+      let norm = (dB - minDb) / range;
+      if (norm < 0) norm = 0;
+      if (norm > 1) norm = 1;
+
+      const smoothed = Math.max(norm, this.prevNormHeights[c] * decayFactor);
+      const val = smoothed < 0.04 ? 0 : smoothed;
+      this.normHeights[c] = val;
+      this.prevNormHeights[c] = val;
+    }
+
+    return this.normHeights;
+  }
+
+  /**
+   * 從環形緩衝區取出最近 FFT_SIZE 筆樣本並計算各頻帶正規化高度（0..1）。
+   * @param {number} [decayFactor=0.75]
+   * @returns {Float32Array}
+   */
+  computeNormalizedHeights(decayFactor = 0.75) {
+    const size = FFT_SIZE;
+    const ringLen = this.ring.length;
+    for (let i = 0; i < size; i++) {
+      const idx = (this.ringPos - size + i + ringLen) % ringLen;
+      this.ringSlice[i] = this.ring[idx];
+    }
+    return this.computeNormalizedHeightsFromSamples(this.ringSlice, decayFactor);
+  }
+
+  /**
+   * 暫停或無新資料時讓正規化頻帶高度逐漸落下。
+   * @param {number} [factor=0.75]
+   * @param {number} [cutoff=0.05]
+   * @returns {{ heights: Float32Array, allZero: boolean }}
+   */
+  decayNormalizedHeights(factor = 0.75, cutoff = 0.05) {
+    const { allZero } = stepDecayLevels(this.prevNormHeights, factor, cutoff);
+    this.normHeights.set(this.prevNormHeights);
+    return { heights: this.normHeights, allZero };
+  }
+
+  resetNormalizedHeights() {
+    this.normHeights.fill(0);
+    this.prevNormHeights.fill(0);
   }
 
   getPeakBand() {

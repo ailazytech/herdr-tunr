@@ -1,6 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeConfigText, parseConfigText, resolveStartupConfig, DEFAULT_CONFIG } from "../mods/tunr/config.js";
+import {
+  SAVED_KEYS,
+  MIN_OPACITY,
+  MAX_OPACITY,
+  OPACITY_STEPS,
+  mergeConfigText,
+  parseConfigText,
+  resolveStartupConfig,
+  clampOpacity,
+  nextOpacityStep,
+  normalizeLastSource,
+  DEFAULT_CONFIG,
+} from "../mods/tunr/config.js";
 
 test("只改指定的鍵且保留 debug 與不認得的鍵，格式為 2 格縮排加結尾換行", () => {
   const existing = JSON.stringify({
@@ -129,4 +141,98 @@ test("settings.json 壞掉或不存在時用 config.json；兩者都沒有時用
 
   const defaultsOnly = resolveStartupConfig(parseConfigText(null), parseConfigText("{broken"));
   assert.deepEqual(defaultsOnly, DEFAULT_CONFIG);
+});
+
+test("opacity 支援 SAVED_KEYS 寫回、三層合併與 5-100 範圍限制與步驟切換", () => {
+  assert.equal(MIN_OPACITY, 5);
+  assert.equal(MAX_OPACITY, 100);
+  assert.deepEqual(OPACITY_STEPS, [100, 75, 50, 25, 10, 5]);
+  assert.equal(clampOpacity(2), 5);
+  assert.equal(clampOpacity(5), 5);
+  assert.equal(clampOpacity(10), 10);
+  assert.equal(clampOpacity(150), 100);
+  assert.equal(clampOpacity("65.4"), 65);
+  assert.equal(clampOpacity("bad", 80), 80);
+
+  const merged = resolveStartupConfig(
+    parseConfigText(JSON.stringify({ opacity: 85 })),
+    parseConfigText(JSON.stringify({ opacity: 2 }))
+  );
+  assert.equal(merged.opacity, 5);
+
+  const out = mergeConfigText(JSON.stringify({ debug: false }), { opacity: 5 });
+  assert.deepEqual(JSON.parse(out), { debug: false, opacity: 5 });
+
+  let step = 100;
+  const seq = [];
+  for (let i = 0; i < 6; i++) {
+    step = nextOpacityStep(step);
+    seq.push(step);
+  }
+  assert.deepEqual(seq, [75, 50, 25, 10, 5, 100]);
+  assert.equal(nextOpacityStep(60), 50);
+});
+
+test("lastSource 支援 SAVED_KEYS 寫回、規範化與三層合併", () => {
+  assert.ok(SAVED_KEYS.includes("lastSource"));
+  assert.equal(normalizeLastSource("system"), null);
+  assert.equal(normalizeLastSource("  "), null);
+  assert.equal(normalizeLastSource(null), null);
+  assert.equal(normalizeLastSource("C:\\music\\a.mp3"), "C:\\music\\a.mp3");
+  assert.equal(normalizeLastSource("https://example.com/live"), "https://example.com/live");
+
+  const merged = resolveStartupConfig(
+    parseConfigText(JSON.stringify({ source: "C:/a.mp4" })),
+    parseConfigText(JSON.stringify({ source: "system", lastSource: "https://example.com/v" }))
+  );
+  assert.equal(merged.source, "system");
+  assert.equal(merged.lastSource, "https://example.com/v");
+
+  // settings 有設定但 lastSource 為 system（非法）時會忽略；若當前 source 為檔案則補記
+  const inferred = resolveStartupConfig(
+    parseConfigText(JSON.stringify({ source: "C:/fallback.mp4" })),
+    parseConfigText(JSON.stringify({ lastSource: "system" }))
+  );
+  assert.equal(inferred.lastSource, "C:/fallback.mp4");
+
+  const saved = mergeConfigText(JSON.stringify({ debug: false }), {
+    source: null,
+    lastSource: "C:/song.mp3",
+  });
+  assert.deepEqual(JSON.parse(saved), {
+    debug: false,
+    source: null,
+    lastSource: "C:/song.mp3",
+  });
+});
+
+test("eq 預設為 true、包含在 SAVED_KEYS 且可正確儲存與覆寫", () => {
+  assert.ok(SAVED_KEYS.includes("eq"));
+  assert.equal(DEFAULT_CONFIG.eq, true);
+
+  const fromDisk = resolveStartupConfig({ eq: false }, {});
+  assert.equal(fromDisk.eq, false);
+
+  const fromSettings = resolveStartupConfig({ eq: false }, { eq: true });
+  assert.equal(fromSettings.eq, true);
+
+  const saved = mergeConfigText(JSON.stringify({ eq: true }), { eq: false });
+  assert.equal(JSON.parse(saved).eq, false);
+});
+
+test("speed 預設為 1、包含在 SAVED_KEYS 且支援三層合併與規範化", () => {
+  assert.ok(SAVED_KEYS.includes("speed"));
+  assert.equal(DEFAULT_CONFIG.speed, 1);
+
+  const fromDisk = resolveStartupConfig({ speed: 1.5 }, {});
+  assert.equal(fromDisk.speed, 1.5);
+
+  const fromSettings = resolveStartupConfig({ speed: 1.5 }, { speed: 0.75 });
+  assert.equal(fromSettings.speed, 0.75);
+
+  const invalid = resolveStartupConfig({ speed: "bad" }, { speed: null });
+  assert.equal(invalid.speed, 1);
+
+  const saved = mergeConfigText(JSON.stringify({ speed: 1 }), { speed: 2 });
+  assert.equal(JSON.parse(saved).speed, 2);
 });

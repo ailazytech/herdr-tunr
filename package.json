@@ -5,6 +5,6 @@
   "type": "module",
   "scripts": {
     "install-mod": "node install.mjs",
-    "test": "node --test test/i18n.test.mjs test/install.test.mjs test/source.test.mjs test/spectrum.test.mjs test/layout.test.mjs test/config.test.mjs test/media.test.mjs"
+    "test": "node --test test/i18n.test.mjs test/install.test.mjs test/source.test.mjs test/spectrum.test.mjs test/layout.test.mjs test/config.test.mjs test/speed.test.mjs test/tracks.test.mjs test/playback-exit.test.mjs test/volume.test.mjs test/zmtp.test.mjs test/media.test.mjs test/wire.test.mjs test/engine-state.test.mjs test/system-stream.test.mjs test/eq.test.mjs test/pcm-sync.test.mjs"
   }
 }

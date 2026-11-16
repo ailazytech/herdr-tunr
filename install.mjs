@@ -45,7 +45,17 @@ async function main() {
   } finally { rl?.close() }
   const source = path.join(here, 'mods', 'tunr'), target = path.join(appHome, 'mods', 'tunr')
   fs.mkdirSync(target, { recursive: true })
-  for (const name of fs.readdirSync(source).sort((a, b) => (b === 'mod.json') - (a === 'mod.json'))) if (name !== 'config.json') fs.copyFileSync(path.join(source, name), path.join(target, name))
+  // mod.json 先複製；icons/ 這類子資料夾整個複製；config.json 是使用者的，不覆蓋
+  for (const entry of fs.readdirSync(source, { withFileTypes: true }).sort((a, b) => (b.name === 'mod.json') - (a.name === 'mod.json'))) {
+    if (entry.name === 'config.json') continue
+    const from = path.join(source, entry.name), to = path.join(target, entry.name)
+    if (entry.isDirectory()) fs.cpSync(from, to, { recursive: true })
+    else fs.copyFileSync(from, to)
+  }
+  for (const obsolete of ['loopback.ps1', 'media.ps1']) {
+    const oldPath = path.join(target, obsolete)
+    if (fs.existsSync(oldPath)) fs.rmSync(oldPath, { force: true })
+  }
   console.log('已安裝 mod：' + target)
   console.log('開啟：herdr-app do mod.open --name tunr；設定放 ' + path.join(target, 'config.json'))
 }
